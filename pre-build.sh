@@ -16,6 +16,12 @@ sed -i \
   -e 's/{ "fw_syn_cook", "0" }/{ "fw_syn_cook", "1" }/' \
   -e 's/{ "sfe_enable",  "0" }/{ "sfe_enable",  "2" }/' \
   "$d"
+# dnsmasq: block DNS rebinding (sites resolving to LAN IPs to reach the admin UI);
+# allow Beeline/2day domains, which may legitimately answer with private addresses
+sed -i 's|"bogus-priv\\n"|"bogus-priv\\n"\n\t\t    "domain-needed\\n"\n\t\t    "stop-dns-rebind\\n"\n\t\t    "rebind-localhost-ok\\n"\n\t\t    "rebind-domain-ok=/beeline.kz/2day.kz/\\n"|' \
+  padavan-ng/trunk/user/rc/services_ex.c
+grep -n -A5 '"bogus-priv' padavan-ng/trunk/user/rc/services_ex.c
+
 # Kazakhstan is UTC+5 since 2024-03-01
 sed -i 's/\(#define DEF_TIMEZONE[[:space:]]*\)"GMT0"/\1"UCT-5"/' padavan-ng/trunk/user/shared/defaults.h
 grep -nE '"(telnetd|sshd_enable|upnp_enable_x|wl_channel|rt_channel|http_access|fw_dos_x|fw_syn_cook|sfe_enable)"' "$d"
