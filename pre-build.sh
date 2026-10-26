@@ -101,6 +101,41 @@ perl -0pi -e 'BEGIN { local $/; open(F, "/tmp/csrf_check.c") or die; $c = <F>; }
 s/(\tlogin_state = http_login_check\(&conn_ip\);\n)/$1$c/;' "$h"
 want "$h" 'Bad Referer.'
 
+# httpd is single-threaded with blocking sockets: a client that vanishes mid-request
+# (e.g. Wi-Fi drop during the TLS handshake) froze the whole admin UI. Give reads a
+# 10 s timeout and make the SSL_accept retry loop give up on it instead of spinning.
+# No send timeout: http_ssl_write would spin on WANT_WRITE; dead peers on write are
+# reaped by TCP keepalive.
+perl -0pi -e 's/(\t\t\t\t\t\t\tsetsockopt\(item->fd, SOL_SOCKET, SO_KEEPALIVE, &int_1, sizeof\(int_1\)\);\n)/$1\t\t\t\t\t\t\t{\n\t\t\t\t\t\t\t\tstruct timeval rcv_to = { 10, 0 };\n\t\t\t\t\t\t\t\tsetsockopt(item->fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));\n\t\t\t\t\t\t\t}\n/' "$h"
+want "$h" 'SO_RCVTIMEO, &rcv_to'
+perl -pi -e 's/if \(ret < 0 && \(err == SSL_ERROR_WANT_READ \|\| err == SSL_ERROR_WANT_WRITE\)\)$/if (ret < 0 \&\& (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) \&\& errno != EAGAIN \&\& errno != EWOULDBLOCK)/' "$s"
+want "$s" '&& errno != EAGAIN && errno != EWOULDBLOCK)'
+
+# Non-blocking TLS pre-connects: handshake, then wait in select() for the request
+# (see patches/httpd_loop.c). Needs per-connection TLS state and a timestamp.
+perl -0pi -e 's/(#if defined \(SUPPORT_HTTPS\)\n\tint ssl;\n)(#endif\n\tusockaddr usa;\n)/$1\tFILE *ssl_fp;\n\tvoid *ssl_h;\n$2\tlong ts;\n/' "$h"
+want "$h" 'void *ssl_h;'
+want "$h" '	long ts;'
+perl -0pi -e 's/(\t\t\t\t\t\titem->ssl = \(i > 0\) \? 1 : 0;\n)(#endif\n)/$1\t\t\t\t\t\titem->ssl_fp = NULL;\n\t\t\t\t\t\titem->ssl_h = NULL;\n$2\t\t\t\t\t\titem->ts = uptime();\n/' "$h"
+want "$h" 'item->ts = uptime();'
+want "$h" 'item->ssl_h = NULL;'
+perl -0pi -e 's/\t\ttv\.tv_sec = MAX_CONN_TIMEOUT;/\t\ttv.tv_sec = 10;/' "$h"
+want "$h" 'tv.tv_sec = 10;'
+perl -0pi -e 'BEGIN { local $/; open(F, "patches/httpd_loop.c") or die; $c = <F>; }
+s/\t\t\/\* Check and process pending or expired requests \*\/\n.*?(?=\n\t\/\* free all pending requests \*\/)/$c/s;' "$h"
+want "$h" 'ssl_server_fopen_ex(item->fd, &item->ssl_h)'
+want "$h" 'ssl_server_fopen(item->fd)' 0
+perl -0pi -e 's/(\t\/\* free all pending requests \*\/\n\tTAILQ_FOREACH_SAFE\(item, &pool\.head, entry, next\) \{\n)/$1#if defined (SUPPORT_HTTPS)\n\t\tif (item->ssl_fp) {\n\t\t\tfclose(item->ssl_fp);\n\t\t\titem->fd = -1;\n\t\t}\n#endif\n/' "$h"
+want "$h" 'fclose(item->ssl_fp);' 2
+perl -0pi -e 's/FILE \*ssl_server_fopen\(int fd\)\n\{/FILE *ssl_server_fopen_ex(int fd, void **ph)\n{/; s/(\tfp = fopencookie\(\(void\*\)hsc, "r\+", http_ssl_io\);\n\tif \(!fp\)\n\t\tgoto ERROR;\n\n)(\treturn fp;\n)/$1\tif (ph)\n\t\t*ph = hsc;\n$2/' "$s"
+want "$s" 'FILE *ssl_server_fopen_ex(int fd, void **ph)'
+want "$s" '*ph = hsc;'
+cat patches/https_tail.c >> "$s"
+want "$s" 'int ssl_server_has_pending(void *h)'
+hh=$t/user/httpd/httpd.h
+perl -pi -e 's/^(extern FILE \*ssl_server_fopen\(int sd\);)$/$1\nextern FILE *ssl_server_fopen_ex(int fd, void **ph);\nextern int ssl_server_has_pending(void *h);/' "$hh"
+want "$hh" 'extern int ssl_server_has_pending(void *h);'
+
 # --- rc ---
 # no ICMP redirects from the router
 i=$t/user/rc/init.c
